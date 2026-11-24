@@ -1,0 +1,23 @@
+name: Bug report
+description: Incorrect results, crashes or integration failures
+body:
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproducer
+      description: Minimal code and exact input. Do not include secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual results
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Commit or version, implementation, OS, compiler or runtime, GMP version
+    validations:
+      required: true

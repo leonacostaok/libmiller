@@ -1,0 +1,15 @@
+{
+  "name": "@miller-primality/libmiller",
+  "version": "0.2.0",
+  "description": "Deterministic Miller primality testing with native BigInt",
+  "type": "module",
+  "license": "MIT",
+  "author": "Leon Acosta",
+  "exports": {".": {"types": "./index.d.ts", "default": "./index.js"}},
+  "types": "./index.d.ts",
+  "files": ["index.js", "index.d.ts", "LICENSE", "README.md"],
+  "sideEffects": false,
+  "engines": {"node": ">=18"},
+  "keywords": ["prime", "primality", "miller", "bigint", "number-theory"],
+  "scripts": {"test": "node --test test.mjs"}
+}

@@ -69,6 +69,23 @@ int main(void) {
     /* Conservative bound still works at a much larger bit length. */
     mpz_set_ui(n,1); mpz_mul_2exp(n,n,4095); mpz_add_ui(n,n,1);
     miller_bound(b,n); CHECK(mpz_cmp_ui(b,16441672)==0);
+    CHECK(miller_abi_version()==1);
+    char output[64]; uint64_t tested=99;
+    CHECK(miller_check_decimal("101",0,&tested,output,sizeof output)==MILLER_PRIME_GRH);
+    CHECK(tested==48 && output[0]=='0' && output[1]=='\0');
+    CHECK(miller_check_decimal("101",1,&tested,output,sizeof output)==MILLER_INCOMPLETE);
+    CHECK(tested==1);
+    const char *invalid[]={"", "-", "+17", " 17", "1 7", "17\n", "1.0", NULL};
+    for(size_t i=0;i<sizeof invalid/sizeof *invalid;++i) {
+        tested=99;
+        CHECK(miller_check_decimal(invalid[i],0,&tested,output,sizeof output)==MILLER_INVALID);
+        CHECK(tested==0);
+    }
+    char tiny[2]={'x','y'};
+    CHECK(miller_check_decimal("101",0,NULL,tiny,sizeof tiny)==MILLER_INVALID);
+    CHECK(tiny[0]=='\0' && tiny[1]=='y');
+    CHECK(miller_check_decimal("101",0,NULL,NULL,1)==MILLER_INVALID);
+    CHECK(miller_check_decimal("00041",0,NULL,NULL,0)==MILLER_PRIME_GRH);
     mpz_clears(n,w,b,t,NULL);
     puts("passed: exhaustive sieve 0..19999, pseudoprimes, known primes, bounds, witnesses, budgets, cancellation");
     return 0;

@@ -1,11 +1,17 @@
 # libmiller
 
-Minimal C99 implementation of Miller’s primality test, backed by GMP.
+Minimal implementations of Miller’s primality test for C, Python and JavaScript/TypeScript.
 
 - Deterministic base selection with an integer-only cutoff.
 - Explicit GRH dependency; no probable-prime results.
 - Work limits, cancellation and compositeness witnesses.
 - Shared/static library and pkg-config support.
+
+| Implementation | Dependency | API |
+| --- | --- | --- |
+| [C](include/miller.h) | GMP | `miller_check`, `miller_check_decimal` |
+| [Python](python/README.md) | C shared library | `check_prime` |
+| [JavaScript / TypeScript](javascript/README.md) | Native BigInt | `checkPrime` |
 
 ## Build
 
@@ -45,9 +51,13 @@ int main(void) {
 | `MILLER_PRIME` | Recognized small prime; independent of GRH |
 | `MILLER_PRIME_GRH` | Full scan passed; primality follows from Dirichlet GRH |
 | `MILLER_INCOMPLETE` | Budget or cancellation stopped the scan |
-| `MILLER_INVALID` | Reserved for adapters |
+| `MILLER_INVALID` | Invalid decimal input or output buffer |
 
 **Do not interpret the status as a boolean.**
+
+`miller_check_decimal(text, max_bases, &tested, witness, size)` provides a C interface
+without GMP objects. Input accepts an optional minus sign followed by ASCII digits.
+The optional witness buffer needs at least `strlen(text) + 1` bytes. FFI ABI version: 1.
 
 `witness`, if supplied, must be initialized and distinct from `n`. It receives a
 proper divisor or failing Miller base, otherwise zero. Cancellation is checked
@@ -84,6 +94,12 @@ ctest --test-dir build-sanitize --output-on-failure
 
 [Benchmarks](docs/benchmarks.md). Full Miller scans are substantially slower than
 GMP’s probable-prime checks. The guarantees differ; no speed advantage is claimed.
+
+## Contributing
+
+Bug reports, mathematical review and focused patches are welcome.
+[Open an issue](https://github.com/leonacostaok/libmiller/issues/new/choose) or read
+[CONTRIBUTING.md](CONTRIBUTING.md). Private reports: [SECURITY.md](SECURITY.md).
 
 ## License
 
