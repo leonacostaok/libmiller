@@ -1,9 +1,9 @@
-name: C library
+name: Tests
 on: [push, pull_request]
 permissions:
   contents: read
 jobs:
-  test:
+  c:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -15,3 +15,40 @@ jobs:
       - run: cmake -S . -B build -DCMAKE_C_COMPILER=${{ matrix.compiler }} -DCMAKE_BUILD_TYPE=Release -DMILLER_SANITIZE=${{ matrix.sanitize }}
       - run: cmake --build build --parallel
       - run: ctest --test-dir build --output-on-failure
+  bindings:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev pkg-config
+      - if: runner.os == 'macOS'
+        run: brew install gmp pkg-config
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+      - name: Locate native library
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            echo "LIBMILLER_PATH=$PWD/build/libmiller.dylib" >> "$GITHUB_ENV"
+          else
+            echo "LIBMILLER_PATH=$PWD/build/libmiller.so" >> "$GITHUB_ENV"
+          fi
+      - run: python -m pip wheel --no-deps ./python --wheel-dir build/wheels
+      - run: python -m pip install build/wheels/*.whl
+      - run: python -m unittest discover -s python/tests
+      - run: npm --prefix javascript test
+      - run: python python/tests/cross_language.py
+      - name: TypeScript declarations
+        run: npm exec --yes --package=typescript@5.9.3 -- tsc --noEmit --strict --target ES2020 --module NodeNext --moduleResolution NodeNext javascript/typecheck.ts
+      - name: JavaScript package
+        working-directory: javascript
+        run: npm pack --pack-destination ../build

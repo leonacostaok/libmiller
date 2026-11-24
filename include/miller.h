@@ -2,6 +2,7 @@
 #define LIBMILLER_H
 #include <gmp.h>
 #include <stdint.h>
+#include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -25,6 +26,15 @@ void miller_bound(mpz_t bound, const mpz_t n);
  * Cancellation/budget applies to base tests, not preprocessing or GMP powm. */
 miller_result miller_check(const mpz_t n, const miller_options *options,
                            mpz_ptr witness);
+/* FFI ABI version; wrappers must require the version they were built for. */
+unsigned int miller_abi_version(void);
+/* Strict signed decimal input: optional '-', then one or more ASCII digits.
+ * witness may be NULL with size zero, or a buffer of at least strlen(decimal)+1.
+ * Returns a miller_status value. Invalid input/buffer returns MILLER_INVALID.
+ * bases_tested may be NULL; otherwise receives zero even on invalid input.
+ * Output buffers must not alias input or each other. */
+int miller_check_decimal(const char *decimal, uint64_t max_bases,
+                         uint64_t *bases_tested, char *witness, size_t witness_size);
 const char *miller_status_name(miller_status status);
 #ifdef __cplusplus
 }

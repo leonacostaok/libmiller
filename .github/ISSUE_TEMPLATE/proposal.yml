@@ -1,0 +1,14 @@
+name: Proposal or question
+description: Mathematical review, improvements or usage questions
+body:
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Question or proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: References, proof, test vectors or reproducible benchmarks, where applicable
