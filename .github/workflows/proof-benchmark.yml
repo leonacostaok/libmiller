@@ -1,0 +1,142 @@
+name: Proof and key benchmarks
+on:
+  workflow_dispatch:
+  push:
+    branches: [bench/proof-key-generation]
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y libgmp-dev libpari-dev pari-gp pkg-config
+      - run: python3 -m pip install cryptography==46.0.3
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel && ctest --test-dir build --output-on-failure
+      - name: Environment
+        run: lscpu; cc --version; dpkg-query -W libgmp-dev libpari-dev pari-gp
+      - name: Compare proofs and actual key creation
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p build/proof-results
+          cat > build/prove.c <<'C'
+          #define _POSIX_C_SOURCE 200809L
+          #include "miller.h"
+          #include <pari/pari.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <time.h>
+          static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (double)t.tv_sec+(double)t.tv_nsec/1e9; }
+          static int cancelled(void *ctx) { return now()>=*(double*)ctx; }
+          int main(int argc,char **argv) {
+           if(argc!=4) return 2;
+           char decimal[2048]; if(!fgets(decimal,sizeof(decimal),stdin)) return 2;
+           decimal[strcspn(decimal,"\r\n")]=0;
+           mpz_t n; mpz_init(n); if(mpz_set_str(n,decimal,10)) return 2;
+           int reps=atoi(argv[2]); double limit=atof(argv[3]);
+           int usepari=strcmp(argv[1],"APRCL")==0 || strcmp(argv[1],"ECPP")==0;
+           GEN pn=NULL; if(usepari) { pari_init(128000000,2000000); pn=strtoi(decimal); }
+           printf("{\"samples_ms\":[");
+           int status=0; unsigned long long bases=0;
+           for(int i=0;i<reps;i++) {
+            double start=now(),deadline=start+limit;
+            if(strcmp(argv[1],"Miller")==0) {
+             miller_options opts={0,cancelled,&deadline}; miller_result r=miller_check(n,&opts,NULL);
+             status=r.status==MILLER_PRIME_GRH || r.status==MILLER_PRIME ? 1 : r.status==MILLER_INCOMPLETE ? -1 : 0;
+             bases=(unsigned long long)r.bases_tested;
+            } else if(usepari) {
+             pari_sp saved=avma;
+             status=(int)(strcmp(argv[1],"APRCL")==0 ? isprimeAPRCL(pn) : isprimeECPP(pn));
+             avma=saved;
+            } else status=mpz_probab_prime_p(n,25)!=0;
+            printf("%s%.6f",i?",":"",(now()-start)*1000);
+            if(status!=1) break;
+           }
+           printf("],\"status\":%d,\"bases_last\":%llu}\n",status,bases);
+           mpz_clear(n); if(usepari) pari_close(); return 0;
+          }
+          C
+          cc -O3 -Iinclude build/prove.c -Lbuild -lmiller -lpari $(pkg-config --cflags --libs gmp) -Wl,-rpath,"$PWD/build" -o build/prove
+          cat > build/proof-benchmark.py <<'PY'
+          import json,os,platform,statistics,subprocess,time
+          from pathlib import Path
+          import cryptography
+          from cryptography.hazmat.primitives import hashes
+          from cryptography.hazmat.primitives.asymmetric import ec,rsa,padding
+          from cryptography.hazmat.backends.openssl.backend import backend
+          out=Path('build/proof-results'); rows=[]
+          def save():
+           (out/'results.json').write_text(json.dumps(rows,indent=2))
+          def prove(n,method,reps=3,limit=120):
+           # Factors go through stdin only. Neither inputs nor keys appear in artifacts.
+           try:
+            p=subprocess.run(['build/prove',method,str(reps),str(limit)],input=str(n)+'\n',text=True,capture_output=True,timeout=limit*reps+20)
+            if p.returncode: raise RuntimeError('proof helper failed: '+method)
+            r=json.loads(p.stdout)
+           except subprocess.TimeoutExpired:
+            r={'status':-1,'samples_ms':[],'timeout_seconds':limit*reps+20}
+           r.update(method=method,bits=n.bit_length())
+           if r['samples_ms']: r['median_ms']=statistics.median(r['samples_ms'])
+           return r
+          # Ordinary randomly generated probable primes, not special-form primes.
+          for bits in [128,256,512]:
+           n=int(subprocess.check_output(['openssl','prime','-generate','-bits',str(bits)],text=True))
+           for method in ['GMP','APRCL','ECPP','Miller']:
+            r=prove(n,method); r['workload']='one random prime'; rows.append(r); save()
+            print(json.dumps(r),flush=True)
+          # Real key generation, then functional tests outside the generation timer.
+          for curve in [ec.SECP256K1(),ec.SECP256R1()]:
+           batches=[]
+           for batch in range(3):
+            start=time.perf_counter(); keys=[ec.generate_private_key(curve) for _ in range(1000)]; batches.append((time.perf_counter()-start)*1000)
+            for key in keys:
+             msg=b'libmiller disposable benchmark'; sig=key.sign(msg,ec.ECDSA(hashes.SHA256())); key.public_key().verify(sig,msg,ec.ECDSA(hashes.SHA256()))
+            del keys,key,sig
+           r={'workload':'1000 ECC key pairs','curve':curve.name,'samples_ms':batches,'median_ms':statistics.median(batches),'sign_verify_passed':3000,'primality_calls':0}
+           rows.append(r); save(); print(json.dumps(r),flush=True)
+          # Five actual RSA keys. Retain the first only for same-factor certification.
+          keytimes=[]; retained=None
+          for i in range(5):
+           start=time.perf_counter(); key=rsa.generate_private_key(public_exponent=65537,key_size=2048); elapsed=(time.perf_counter()-start)*1000; keytimes.append(elapsed)
+           msg=b'libmiller disposable benchmark'; sig=key.sign(msg,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=padding.PSS.MAX_LENGTH),hashes.SHA256()); key.public_key().verify(sig,msg,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=padding.PSS.MAX_LENGTH),hashes.SHA256())
+           if i==0: retained=key; retained_ms=elapsed
+          rows.append({'workload':'RSA-2048 key generation','samples_ms':keytimes,'median_ms':statistics.median(keytimes),'sign_verify_passed':5}); save()
+          nums=retained.private_numbers()
+          for method in ['APRCL','ECPP','Miller']:
+           factors=[prove(n,method,reps=1) for n in [nums.p,nums.q]]
+           complete=all(x['status']==1 for x in factors)
+           extra=sum(x.get('median_ms',x.get('timeout_seconds',0)*1000) for x in factors)
+           r={'workload':'RSA-2048 generation plus factor certification','method':method,'complete':complete,'generation_ms':retained_ms,'certification_ms':extra,'total_ms':retained_ms+extra,'factors':factors}
+           rows.append(r); save(); print(json.dumps(r),flush=True)
+          del nums,retained,key,sig
+          metadata={'platform':platform.platform(),'cryptography':cryptography.__version__,'crypto_openssl':backend.openssl_version_text(),'system_openssl':subprocess.check_output(['openssl','version'],text=True).strip(),'pari':subprocess.check_output(['gp','--version-short'],text=True,stderr=subprocess.STDOUT).strip()}
+          (out/'environment.json').write_text(json.dumps(metadata,indent=2))
+          lines=['# Proof and real-key benchmark','',json.dumps(metadata),'','| Workload | Method | Median or single-run time | Result |','| --- | --- | ---: | --- |']
+          for r in rows:
+           if r['workload']=='one random prime':
+            lines.append(f"| One {r['bits']}-bit random prime | {r['method']} | {r.get('median_ms',0):.3f} ms | {'complete' if r['status']==1 else 'incomplete'} |")
+           elif 'certification_ms' in r:
+            lines.append(f"| RSA-2048 creation + factor certification | {r['method']} | {r['total_ms']:.3f} ms total; {r['certification_ms']:.3f} ms added | {'complete' if r['complete'] else 'incomplete: lower bound, not finished'} |")
+           else:
+            lines.append(f"| {r['workload']} | {r.get('curve','OpenSSL')} | {r['median_ms']:.3f} ms | signatures verified |")
+          lines+=['','Primality timings exclude subprocess startup, parsing and library initialization. Three sequential repetitions on one random input per size; no broad-corpus claim. RSA factor certification uses one real key (two 1024-bit factors), one run per method. A 120-second limit applies to each Miller factor; incomplete scans are not proof. PARI subprocesses have a hard deadline.','',
+          'RSA comparison adds certification to normal OpenSSL generation; it does not replace OpenSSL candidate selection. All methods receive the same factors. ECC does not invoke primality testing. Keys and factors remain ephemeral and are not included in reports.','',
+          'APR-CL and ECPP establish primality without a GRH assumption. Miller retains its Dirichlet GRH dependency. GMP is a probable-prime baseline. ECPP timing here is a primality decision, not certificate export and independent verification.','']
+          report='\n'.join(lines); (out/'results.md').write_text(report)
+          if os.getenv('GITHUB_STEP_SUMMARY'):
+           with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write(report)
+          print(report,flush=True)
+          PY
+          python3 -u build/proof-benchmark.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proof-key-results
+          path: build/proof-results/
+          retention-days: 14
