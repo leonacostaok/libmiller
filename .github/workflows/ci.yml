@@ -1,0 +1,17 @@
+name: C library
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+        sanitize: ["OFF", "ON"]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libgmp-dev pkg-config
+      - run: cmake -S . -B build -DCMAKE_C_COMPILER=${{ matrix.compiler }} -DCMAKE_BUILD_TYPE=Release -DMILLER_SANITIZE=${{ matrix.sanitize }}
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure

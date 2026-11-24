@@ -1,0 +1,11 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: libmiller
+Description: Deterministic Miller primality checking with an explicit GRH dependency
+Version: @PROJECT_VERSION@
+Requires: gmp
+Libs: -L${libdir} -lmiller
+Cflags: -I${includedir}
