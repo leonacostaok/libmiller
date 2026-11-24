@@ -1,0 +1,153 @@
+name: Benchmarks
+on:
+  workflow_dispatch:
+  push:
+    branches: [bench/comparison]
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y libgmp-dev pkg-config
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+      - name: Environment
+        run: uname -a; lscpu; cc --version; node --version; python3 --version
+      - name: Compare primality tests and ECC key generation
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p build/benchmark
+          cat > build/benchmark/compare.c <<'C'
+          #define _POSIX_C_SOURCE 200809L
+          #include "miller.h"
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <time.h>
+          static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (double)t.tv_sec + (double)t.tv_nsec/1e9; }
+          static int cmp(const void *a,const void *b) { double x=*(const double*)a,y=*(const double*)b; return (x>y)-(x<y); }
+          static volatile int sink;
+          int main(void) {
+           const char *v[]={"2147483647","2305843009213693951","170141183460469231731687303715884105727","341550071728321","1000000016000000063"};
+           puts("implementation,input,iterations,median_us,min_us,max_us");
+           mpz_t n; mpz_init(n);
+           for(size_t i=0;i<sizeof(v)/sizeof(*v);i++) {
+            mpz_set_str(n,v[i],10);
+            miller_result r=miller_check(n,NULL,NULL);
+            int g=mpz_probab_prime_p(n,25);
+            if ((r.status==MILLER_PRIME_GRH || r.status==MILLER_PRIME)!=(g!=0)) return 2;
+            for(int mode=0;mode<2;mode++) {
+             size_t count=1; double elapsed;
+             do {
+              double start=now();
+              for(size_t j=0;j<count;j++) sink=mode ? mpz_probab_prime_p(n,25) : (int)miller_check(n,NULL,NULL).status;
+              elapsed=now()-start;
+              if(elapsed>=0.02 || count>=65536) break;
+              count*=2;
+             } while(1);
+             double samples[7];
+             for(int b=0;b<7;b++) {
+              double start=now();
+              for(size_t j=0;j<count;j++) sink=mode ? mpz_probab_prime_p(n,25) : (int)miller_check(n,NULL,NULL).status;
+              samples[b]=(now()-start)*1e6/(double)count;
+             }
+             qsort(samples,7,sizeof(double),cmp);
+             printf("%s,%s,%zu,%.6f,%.6f,%.6f\n",mode?"GMP reps=25":"C Miller",v[i],count,samples[3],samples[0],samples[6]);
+            }
+           }
+           mpz_clear(n);
+           fprintf(stderr,"GMP %s\n",gmp_version);
+           return 0;
+          }
+          C
+          cc -O3 -Iinclude build/benchmark/compare.c -Lbuild -lmiller $(pkg-config --cflags --libs gmp) -Wl,-rpath,"$PWD/build" -o build/benchmark/compare
+          ./build/benchmark/compare > build/benchmark/c.csv
+          cat > build/benchmark/compare.mjs <<'JS'
+          import { checkPrime } from '../../javascript/index.js';
+          import { randomBytes, createECDH } from 'node:crypto';
+          import { performance } from 'node:perf_hooks';
+          const values=['2147483647','2305843009213693951','170141183460469231731687303715884105727','341550071728321','1000000016000000063'];
+          console.log('implementation,input,iterations,median_us,min_us,max_us');
+          function measure(name,input,fn,fixed=0) {
+            for(let i=0;i<3;i++) fn();
+            let count=fixed || 1;
+            if(!fixed) while(count<65536) {
+              const t=performance.now(); for(let i=0;i<count;i++) fn();
+              if(performance.now()-t>=20) break;
+              count*=2;
+            }
+            const times=[];
+            for(let b=0;b<7;b++) {
+              const t=performance.now(); for(let i=0;i<count;i++) fn();
+              times.push((performance.now()-t)*1000/count);
+            }
+            times.sort((a,b)=>a-b);
+            console.log([name,input,count,times[3],times[0],times[6]].join(','));
+          }
+          for(const s of values) { const n=BigInt(s); measure('JavaScript Miller',s,()=>checkPrime(n)); }
+          // Ephemeral benchmark keys only: never print, serialize or store key material.
+          const order=0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+          measure('secp256k1 private scalar','1000 keys per batch',()=>{
+            let bytes,n;
+            do { bytes=randomBytes(32); n=BigInt('0x'+bytes.toString('hex')); bytes.fill(0); } while(n===0n || n>=order);
+          },1000);
+          measure('secp256k1 key pair','1000 keys per batch',()=>{
+            const key=createECDH('secp256k1'); key.generateKeys();
+          },1000);
+          console.error(`Node ${process.version}; OpenSSL ${process.versions.openssl}`);
+          JS
+          node build/benchmark/compare.mjs > build/benchmark/js.csv
+          PYTHONPATH=python python3 - <<'PY'
+          import csv,ctypes,os,platform,statistics,time
+          from pathlib import Path
+          from libmiller import check_prime
+          root=Path.cwd()
+          lib=str(root/'build'/('libmiller.dylib' if platform.system()=='Darwin' else 'libmiller.so'))
+          values=[2147483647,2305843009213693951,170141183460469231731687303715884105727,341550071728321,1000000016000000063]
+          with open('build/benchmark/python.csv','w') as f:
+           w=csv.writer(f); w.writerow(['implementation','input','iterations','median_us','min_us','max_us'])
+           for n in values:
+            fn=lambda:check_prime(n,library=lib)
+            fn(); count=1
+            while True:
+             start=time.perf_counter()
+             for _ in range(count): fn()
+             if time.perf_counter()-start>=.02 or count>=65536: break
+             count*=2
+            samples=[]
+            for _ in range(7):
+             start=time.perf_counter()
+             for _ in range(count): fn()
+             samples.append((time.perf_counter()-start)*1e6/count)
+            w.writerow(['Python ctypes Miller',n,count,statistics.median(samples),min(samples),max(samples)])
+          rows=[]
+          for p in ['c','python','js']:
+           with open(f'build/benchmark/{p}.csv') as f: rows.extend(csv.DictReader(f))
+          lines=['# Initial benchmark','',f'Platform: {platform.platform()}; Python {platform.python_version()}.', '',
+          'Median of seven warmed batches. Primality batches adapt to at least 20 ms (cap 65,536 iterations); ECC batches contain 1,000 operations. Wall time; shared machines may be noisy. Inputs are fixed, not a representative random corpus.', '',
+          'C excludes decimal parsing; Python includes FFI, parsing and result allocation. JavaScript uses pre-parsed BigInts. GMP reps=25 gives different guarantees; this is not an equal-guarantee speed comparison.', '',
+          '| Implementation | Input | Median per operation (µs) | Min–max (µs) |',
+          '| --- | --- | ---: | ---: |']
+          for r in rows:
+           lines.append(f"| {r['implementation']} | {r['input']} | {float(r['median_us']):.3f} | {float(r['min_us']):.3f}–{float(r['max_us']):.3f} |")
+          lines+=['','ECC uses standard secp256k1 parameters. Private scalars need not be prime; generating a key pair computes the public point. Neither benchmark calls libmiller. Therefore replacing a primality test changes neither path; no before/after speedup is measured.','']
+          text='\n'.join(lines)
+          Path('build/benchmark/results.md').write_text(text)
+          print(text)
+          if os.environ.get('GITHUB_STEP_SUMMARY'):
+           with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write(text)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: build/benchmark/
+          retention-days: 14
